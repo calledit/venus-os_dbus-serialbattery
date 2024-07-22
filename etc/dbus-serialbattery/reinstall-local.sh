@@ -458,6 +458,9 @@ if [ "$can_lenght" -gt 0 ]; then
             echo "#!/bin/sh"
             echo "exec 2>&1"
             echo "echo"
+	    # close earlier unclosed conections to the BMS, timeout after 4s
+	    echo "python3 -c \"import os, time; os.popen('bluetoothctl disconnect $3');time.sleep(4)\""
+            # start the service
             echo "python /opt/victronenergy/dbus-serialbattery/dbus-serialbattery.py $1"
         } > "/service/dbus-canbattery.$1/run"
         chmod 755 "/service/dbus-canbattery.$1/run"
