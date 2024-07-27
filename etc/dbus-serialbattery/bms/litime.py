@@ -10,69 +10,34 @@ from bleak import BleakClient
 
 import sys
 
-
-class LiTime_Ble(Battery):
-    def __init__(self, port, baud, address):
-        super(LiTime_Ble, self).__init__(port, baud, address)
-        self.type = self.BATTERYTYPE
-        self.address = address
-        self.poll_interval = 2000
-
-    BATTERYTYPE = "LiTime"
-
-    write_characteristic = "0000ffe2-0000-1000-8000-00805f9b34fb"
-    read_characteristic = "0000ffe1-0000-1000-8000-00805f9b34fb"
-
-    query_battery_status = bytes([0x00, 0x00, 0x04, 0x01, 0x13, 0x55, 0xAA, 0x17])
+class Syncron_Ble:
 
     ble_async_thread_ready = threading.Event()
     ble_connection_ready = threading.Event()
     ble_async_thread_event_loop = False
     client = False
+    address = None
     response_event = False
     response_data = False
     main_thread = False
 
-    last_remian_ah = 0
-    last_remian_ah_time = 0
-    last_remian_ah_initiation = 0
-    current_based_on_remaning = 0
-    last_few_currents = []
+    write_characteristic = None
+    read_characteristic = None
 
+    def __init__(self, address, read_characteristic, write_characteristic):
+        self.write_characteristic = write_characteristic
+        self.read_characteristic = read_characteristic
+        self.address = address
 
-    def test_connection(self):
-        """
-        call a function that will connect to the battery, send a command and retrieve the result.
-        The result or call should be unique to this BMS. Battery name or version, etc.
-        Return True if success, False for failure
-        """
-        logger.info("test_connection")
         self.main_thread = threading.current_thread()
         ble_async_thread = threading.Thread(name="BMS_bluetooth_async_thread", target=self.initiate_ble_thread_main, daemon=True)
         ble_async_thread.start()
         thread_start_ok = self.ble_async_thread_ready.wait(2)
-        connected_ok = self.ble_connection_ready.wait(90)
+        connected_ok = self.ble_connection_ready.wait(10)
         if not thread_start_ok:
             logger.error("thread took to long to start")
-            return False
         if not connected_ok:
             logger.error("BLE connection to BMS took to long to inititate")
-            return False
-
-        self.send_com()
-        self.get_settings()
-
-        return True
-
-    def client_disconnected(self, client):
-        logger.error("BMS disconnected")
-
-    #saves response and tells the command sender that the response has arived
-    def notify_read_callback(self, sender, data: bytearray):
-        self.response_data = data
-        self.response_event.set()
-
-
 
     def initiate_ble_thread_main(self):
         asyncio.run(self.async_main(self.address))
@@ -85,6 +50,9 @@ class LiTime_Ble(Battery):
         while self.main_thread.is_alive():
             await self.connect_to_bms(self.address)
             await asyncio.sleep(1)#sleep one second before trying to reconnecting
+
+    def client_disconnected(self, client):
+        logger.error("BMS disconnected")
 
     async def connect_to_bms(self, address):
         self.client = BleakClient(address, disconnected_callback=self.client_disconnected)
@@ -103,6 +71,10 @@ class LiTime_Ble(Battery):
                 await asyncio.sleep(0.1)
             await self.client.disconnect()
 
+    #saves response and tells the command sender that the response has arived
+    def notify_read_callback(self, sender, data: bytearray):
+        self.response_data = data
+        self.response_event.set()
 
     async def ble_thread_send_com(self, command):
         self.response_event = asyncio.Event()
@@ -117,10 +89,41 @@ class LiTime_Ble(Battery):
         result = await asyncio.wait_for(asyncio.wrap_future(bt_task), timeout=1.5)
         return result
 
-    def send_com(self):
-        #logger.info("requesting battery status")
-        data = asyncio.run(self.send_coroutine_to_ble_thread_and_wait_for_result(self.ble_thread_send_com(self.query_battery_status)))
-        self.parse_status(data)
+    def send_data(self, data):
+        data = asyncio.run(self.send_coroutine_to_ble_thread_and_wait_for_result(self.ble_thread_send_com(data)))
+        return data
+
+class LiTime_Ble(Battery):
+    def __init__(self, port, baud, address):
+        super(LiTime_Ble, self).__init__(port, baud, address)
+        self.type = self.BATTERYTYPE
+        self.address = address
+        self.poll_interval = 2000
+
+    BATTERYTYPE = "LiTime"
+
+    query_battery_status = bytes([0x00, 0x00, 0x04, 0x01, 0x13, 0x55, 0xAA, 0x17])
+    ble_handle = None
+
+    last_remian_ah = 0
+    last_remian_ah_time = 0
+    last_remian_ah_initiation = 0
+    current_based_on_remaning = 0
+    last_few_currents = []
+
+
+    def test_connection(self):
+        """
+        call a function that will connect to the battery, send a command and retrieve the result.
+        The result or call should be unique to this BMS. Battery name or version, etc.
+        Return True if success, False for failure
+        """
+        logger.info("test_connection")
+        self.ble_handle = Syncron_Ble(self.address, read_characteristic = "0000ffe1-0000-1000-8000-00805f9b34fb", write_characteristic = "0000ffe2-0000-1000-8000-00805f9b34fb")
+        self.request_and_proccess_battery_staus()
+        self.get_settings()
+
+        return True
 
     def unique_identifier(self) -> str:
         return self.address
@@ -262,11 +265,16 @@ class LiTime_Ble(Battery):
         self.min_battery_voltage = utils.MIN_CELL_VOLTAGE * self.cell_count
         return True
 
+    def request_and_proccess_battery_staus(self):
+        #logger.info("requesting battery status")
+        data = self.ble_handle.send_data(self.query_battery_status)
+        self.parse_status(data)
+
     def refresh_data(self):
         """
         This is called each time the library wants data (1 second)
         """
 
-        self.send_com()
+        self.request_and_proccess_battery_staus()
 
         return True
