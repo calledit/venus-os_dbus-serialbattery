@@ -1,12 +1,6 @@
 # -*- coding: utf-8 -*-
-
-# NOTES
-# Please see "Add/Request a new BMS" https://mr-manuel.github.io/venus-os_dbus-serialbattery/general/supported-bms#add-by-opening-a-pull-request
-# in the documentation for a checklist what you have to do, when adding a new BMS
-
-# avoid importing wildcards, remove unused imports
 from battery import Battery, Cell
-from utils import is_bit_set, read_serial_data, logger
+from utils import logger
 import utils
 from struct import unpack_from
 import threading
@@ -22,7 +16,6 @@ class LiTime_Ble(Battery):
         super(LiTime_Ble, self).__init__(port, baud, address)
         self.type = self.BATTERYTYPE
         self.address = address
-        #self.poll_interval = 5000
         self.poll_interval = 2000
 
     BATTERYTYPE = "Litime"
@@ -63,35 +56,16 @@ class LiTime_Ble(Battery):
             logger.error("thread took to long to start")
             return False
         if not connected_ok:
-            logger.error("Chnage BLE connection to BMS took to long to inititate")
+            logger.error("BLE connection to BMS took to long to inititate")
             return False
 
         self.send_com()
+        self.get_settings()
 
         return True
 
-        result = False
-        try:
-            result = self.read_status_data()
-            # get first data to show in startup log, only if result is true
-            result = result and self.refresh_data()
-        except Exception:
-            (
-                exception_type,
-                exception_object,
-                exception_traceback,
-            ) = sys.exc_info()
-            file = exception_traceback.tb_frame.f_code.co_filename
-            line = exception_traceback.tb_lineno
-            logger.error(
-                f"Exception occurred: {repr(exception_object)} of type {exception_type} in {file} line #{line}"
-            )
-            result = False
-
-        return result
-
     def client_disconnected(self, client):
-        logger.info("client_disconnected(client)")
+        logger.error("BMS disconnected")
 
     #saves response and tells the command sender that the response has arived
     def notify_read_callback(self, sender, data: bytearray):
@@ -113,18 +87,15 @@ class LiTime_Ble(Battery):
             await asyncio.sleep(1)#sleep one second before trying to reconnecting
 
     async def connect_to_bms(self, address):
-        logger.info("create client: "+address)
         self.client = BleakClient(address, disconnected_callback=self.client_disconnected)
         try:
-            logger.info("connect: "+address)
+            logger.info("initiate BLE connection to: "+address)
             await self.client.connect()
             logger.info("connected")
             await self.client.start_notify(self.read_characteristic, self.notify_read_callback)
-            logger.info("notifications active")
 
         except Exception as e:
             logger.error("Failed when trying to connect", e)
-            #logger.error(e)
             return False
         finally:
             self.ble_connection_ready.set()
@@ -149,20 +120,9 @@ class LiTime_Ble(Battery):
     def send_com(self):
         #logger.info("requesting battery status")
         data = asyncio.run(self.send_corutine_to_ble_thread_and_wait_for_result(self.ble_thred_send_com(self.query_battery_status)))
-        #logger.info("got battery status")
-        #print("\n")
         self.parse_status(data)
 
     def unique_identifier(self) -> str:
-        """
-        Used to identify a BMS when multiple BMS are connected
-        Provide a unique identifier from the BMS to identify a BMS, if multiple same BMS are connected
-        e.g. the serial number
-        If there is no such value, please remove this function
-        """
-        #logger.info("unique_identifier called before get_settings so serial_number is not populated")
-        #return "litime_serial_12345"
-
         return self.address
 
     def connection_name(self) -> str:
@@ -172,14 +132,12 @@ class LiTime_Ble(Battery):
         return "Bat: " + self.type + " " + self.address[-5:]
 
     def parse_status(self, data):
-        #voltages 8-16
         messured_total_voltage, cells_added_together_voltage = unpack_from("II", data, 8)
         messured_total_voltage /= 1000
         cells_added_together_voltage /= 1000
 
-        heat, not_known4, protection_state, failure_state, is_balancing, battery_state, SOC, SOH, discharges_count, discharges_amph_count = unpack_from("IIIIIHHIII", data, 68)
+        heat, balance_memory_active, protection_state, failure_state, is_balancing, battery_state, SOC, SOH, discharges_count, discharges_amph_count = unpack_from("IIIIIHHIII", data, 68)
 
-        #Cell voltages 16-48
         nr_of_cells = 0
         cellv_str = ""
         for byte_pos in range(16, 48, 2):
@@ -195,31 +153,18 @@ class LiTime_Ble(Battery):
 
         self.cell_count = nr_of_cells
 
-        self.max_battery_voltage = utils.MAX_CELL_VOLTAGE * self.cell_count
-        self.min_battery_voltage = utils.MIN_CELL_VOLTAGE * self.cell_count
-
-        #print("cell_voltages: ", cell_voltages)
-
-        #Curent, temp and so on 48-68
-        #c1, c2, c3, c4 = unpack_from("BBBB", data, 48)
-        #cur1, cur2 = unpack_from("hh", data, 48)
         current, cell_temp, mosfet_temp, unknown_temp, not_known1, not_known2, remaining_amph, full_charge_capacity_amph, not_known3 = unpack_from("ihhhHHHHH", data, 48)
-        #current seams wrong
+
+        #current sensor is very inaccurate
         current = current/1000
 
         remaining_amph /= 100
         full_charge_capacity_amph /= 100
 
-
+        #Debug data
         #print(f"current: {current}, cell_temp: {cell_temp}, mosfet_temp: {mosfet_temp}, unknown_temp: {unknown_temp}, not_known1: {not_known1}, not_known2: {not_known2}")
         #print(f"remaining_amph: {remaining_amph}, full_charge_capacity_amph: {full_charge_capacity_amph}, not_known3: {not_known3}")
-
-        B1, B2, B3, B4 = unpack_from("BBBB", data, 84)
-        #logger.info(f"bal bytes: {B1}, {B2}, {B3}, {B4}")
-        H1, H2, H3, H4 = unpack_from("BBBB", data, 68)
-        #logger.info(f"heat bytes: {H1}, {H2}, {H3}, {H4}")
-
-        #print(f"heat: {heat}, not_known4: {not_known4}, protection_state: {protection_state}, failure_state: {failure_state}, is_balancing: {is_balancing}, battery_state: {battery_state}, SOC: {SOC}, SOH: {SOH}, discharges_count: {discharges_count}, discharges_amph_count: {discharges_amph_count}")
+        #print(f"heat: {heat}, b_m_a: {balance_memory_active}, protection_state: {protection_state}, failure_state: {failure_state}, is_balancing: {is_balancing}, battery_state: {battery_state}, SOC: {SOC}, SOH: {SOH}, discharges_count: {discharges_count}, discharges_amph_count: {discharges_amph_count}")
 
         self.capacity = full_charge_capacity_amph
         self.voltage = messured_total_voltage
@@ -230,35 +175,33 @@ class LiTime_Ble(Battery):
         else:
              self.balance_fet = False
 
-        f = open("/data/charge_log.txt", "a")
-        timestr = time.ctime()
-        f.write(f"timestr: {timestr} curr: {current}, nk1: {not_known1}, nk2: {not_known2}, n3: {not_known3},  SOC: {SOC}, tot_v: {messured_total_voltage}, add_v: {cells_added_together_voltage}, protect_state: {protection_state}, fail_state: {failure_state}, is_bal: {bin(is_balancing)}, bat_st: {battery_state}, heat: {heat}, nk4: {not_known4}, rem_ah: {remaining_amph} {cellv_str}\n")
-        f.close()
+        #Debug data
+        #f = open("/data/charge_log.txt", "a")
+        #timestr = time.ctime()
+        #f.write(f"timestr: {timestr} curr: {current}, nk1: {not_known1}, nk2: {not_known2}, n3: {not_known3},  SOC: {SOC}, tot_v: {messured_total_voltage}, add_v: {cells_added_together_voltage}, protect_state: {protection_state}, fail_state: {failure_state}, is_bal: {bin(is_balancing)}, bat_st: {battery_state}, heat: {heat}, b_m_a: {balance_memory_active}, rem_ah: {remaining_amph} {cellv_str}\n")
+        #f.close()
 
+        #Due to the fact that the current reading is very inacurare we try to calculate current draw from remaining_amph
         current_based_on_remaning = 0
-
         if self.Last_remianAh == 0:
             self.current = 0
             self.Last_remianAh = remaining_amph
             self.Last_remianAh_time = time.time()
-            logger.info("initate Last_remianAh")
 
-        time_since_last_update = int(time.time() - self.Last_remianAh_time)
+        now_time = time.time()
+        time_since_last_update = int(now_time - self.Last_remianAh_time)
         if self.Last_remianAh != remaining_amph:
-            now_time = time.time()
             Last_remianAh_time_diff = float(now_time - self.Last_remianAh_time)/3600
             Last_remianAh_change_diff = remaining_amph - self.Last_remianAh
             self.Last_remianAh = remaining_amph
             self.Last_remianAh_time = now_time
-            if self.Last_remianAh_initiation == 0:
+            if self.Last_remianAh_initiation == 0:#since we dont know how long the last reasing has been active we need to wait for another reading
                 self.Last_remianAh_initiation = 1
             else:
                 self.current_based_on_remaning = Last_remianAh_change_diff/Last_remianAh_time_diff
-                #logger.info(f"update current_based_on_remaning: {self.current_based_on_remaning} current: {current}")
                 self.Last_remianAh_initiation = 2
-        #else:
-        #    logger.info(f"unchanged current_based_on_remaning: {self.current_based_on_remaning} current: {current}")
 
+        #Calculate average current over last 5 messurments due to sensor inacuracy
         self.last_few_currents.append(current)
         if len(self.last_few_currents) > 5:
             self.last_few_currents.pop(0)
@@ -267,7 +210,7 @@ class LiTime_Ble(Battery):
 
         Use_Reason = ""
         #if last update was long ago we use the current reported by the bms despite it beeing unstable, we also use the current from the BMS if there is a very large discrepency betwen them
-        if time_since_last_update > 120:
+        if time_since_last_update > 25:
             self.current = Last_few_avg
             Use_Reason = "curr: over 120s since last remaining_amph update"
 
@@ -283,24 +226,23 @@ class LiTime_Ble(Battery):
             self.current = self.current_based_on_remaning
             Use_Reason = "base"
 
-        logger.info(f"{Use_Reason}, current:{current:.3f}, Last_few_avg: {Last_few_avg:.3f}, base: {self.current_based_on_remaning:.3f}")#, cur1: {cur1}, cur2: {cur2}, c1: {c1}, c2: {c2}, c3: {c3}, c4: {c4}")
+        #Debug data
+        #logger.info(f"{Use_Reason}, current:{current:.3f}, Last_few_avg: {Last_few_avg:.3f}, base: {self.current_based_on_remaning:.3f}")
 
-        #Overwrite earlier logic
-        #self.current = current
-
-        # temperature sensor 1 in °C (float)
-        temp1 = cell_temp
-        self.to_temp(1, temp1)
 
         # status of the battery if charging is enabled (bool)
         self.charge_fet = True
         if battery_state == 4:
             self.charge_fet = False
 
-        # status of the battery if discharging is enabled (bool)
+        # status of the battery if discharging is enabled (bool) (there might be other values of heat or battery_state that could indicate that discharge is disabled)
         self.discharge_fet = True
+        if heat == 0x80 or protection_state in (0x20, 0x80):
+            self.discharge_fet = False
 
-        self.capacity_remaining = remaining_amph
+        # temperature sensor 1 in °C (float)
+        temp1 = cell_temp
+        self.to_temp(1, temp1)
 
         # temperature sensor 2 in °C (float)
         temp2 = unknown_temp
@@ -310,241 +252,21 @@ class LiTime_Ble(Battery):
         temp_mos = mosfet_temp
         self.to_temp(0, temp_mos)
 
+        self.capacity_remaining = remaining_amph
         self.history.total_ah_drawn = discharges_amph_count
-
         self.history.full_discharges = discharges_count
 
     def get_settings(self):
-        """
-        After successful connection get_settings() will be called to set up the battery
-        Set all values that only need to be set once
-        Return True if success, False for failure
-        """
-        logger.info("get_settings")
-
-
-        # MANDATORY values to set
-        # does not need to be in this function, but has to be set at least once
-        # could also be read in a function that is called from refresh_data()
-        #
-        # if not available from battery, then add a section in the `config.default.ini`
-        # under ; --------- BMS specific settings ---------
-
-        # number of connected cells (int)
-        #self.cell_count = 8 #VALUE_FROM_BMS
-
-        # capacity of the battery in ampere hours (float)
-        #self.capacity = 100 #VALUE_FROM_BMS
-
-        # init the cell array once XXXXX FIX 8 hardcoded
-        for _ in range(8):
-            self.cells.append(Cell(False))
-
-
-        self.send_com()
 
         self.max_battery_voltage = utils.MAX_CELL_VOLTAGE * self.cell_count
         self.min_battery_voltage = utils.MIN_CELL_VOLTAGE * self.cell_count
-
-        # OPTIONAL values to set
-        # does not need to be in this function
-        # could also be read in a function that is called from refresh_data()
-        # maximum charge current in amps (float)
-        #self.max_battery_charge_current = VALUE_FROM_BMS
-
-        # maximum discharge current in amps (float)
-        #self.max_battery_discharge_current = VALUE_FROM_BMS
-
-        # serial number of the battery (str)
-        #self.serial_number = "litime_serial_1234"
-
-        # custom field, that the user can set in the BMS software (str)
-        #self.custom_field = VALUE_FROM_BMS
-
-
-        # production date of the battery (str)
-        #self.production = "timestr from bms"
-
-        # hardware version of the BMS (str)
-        #self.hardware_version = "harware_vers"
-        #self.hardware_version = f"LiTimeBMS {self.hardware_version} {self.cell_count}S ({self.production})"
-
-        # serial number of the battery (str)
-        ##self.serial_number = VALUE_FROM_BMS Dual line
         return True
 
     def refresh_data(self):
         """
-        call all functions that will refresh the battery data.
-        This will be called for every iteration (1 second)
-        Return True if success, False for failure
+        This is called each time the library wants data (1 second)
         """
-
-        #result = self.read_status_data()
-
-        # only read next dafa if the first one was successful
-        #result = result and self.read_cell_data()
 
         self.send_com()
 
-
-        # this is only an example, you can combine all into one function
-        # or split it up into more functions, whatever fits best for your BMS
-
-        return True
-
-    def read_status_data(self):
-        # read the status data
-        status_data = True #self.read_serial_data_template(self.command_status)
-
-        # check if connection was successful
-        if status_data is False:
-            return False
-
-        # unpack the data
-        #(
-        #    value_1,
-        #    value_2,
-        #    value_3,
-        #    value_4,
-        #    value_5,
-        #) = unpack_from(">bb??bhx", status_data)
-
-        # Integrate a check to be sure, that the received data is from the BMS type you are making this driver for
-
-        # MANDATORY values to set
-        # voltage of the battery in volts (float)
-        self.voltage = 26.063
-
-        # current of the battery in amps (float)
-        self.current = 0.1
-
-        # state of charge in percent (float)
-        self.soc = 100
-
-        # temperature sensor 1 in °C (float)
-        temp1 = 18
-        self.to_temp(1, temp1)
-
-        # status of the battery if charging is enabled (bool)
-        self.charge_fet = True
-
-        # status of the battery if discharging is enabled (bool)
-        self.discharge_fet = True
-
-        # OPTIONAL values to set
-        # remaining capacity of the battery in ampere hours (float)
-        # if not available, then it's calculated from the SOC and the capacity
-        self.capacity_remaining = 98.87
-
-        # temperature sensor 2 in °C (float)
-        #temp2 = VALUE_FROM_BMS
-        #self.to_temp(2, temp2)
-
-        # temperature sensor 3 in °C (float)
-        #temp3 = VALUE_FROM_BMS
-        #self.to_temp(3, temp3)
-
-        # temperature sensor 4 in °C (float)
-        #temp4 = VALUE_FROM_BMS
-        #self.to_temp(4, temp4)
-
-        # temperature sensor MOSFET in °C (float)
-        temp_mos = 18
-        self.to_temp(0, temp_mos)
-
-        # status of the battery if balancing is enabled (bool)
-        #self.balance_fet = VALUE_FROM_BMS ##Duplicate is this required or optional?
-
-        # PROTECTION values
-        # 2 = alarm, 1 = warningm 0 = ok
-        # high battery voltage alarm (int)
-        #self.protection.voltage_high = VALUE_FROM_BMS What does alarm mean? and warning?
-
-        # low battery voltage alarm (int)
-        #self.protection.voltage_low = VALUE_FROM_BMS
-
-        # low cell voltage alarm (int)
-        #self.protection.voltage_cell_low = VALUE_FROM_BMS
-
-        # low SOC alarm (int)
-        #self.protection.soc_low = VALUE_FROM_BMS
-
-        # high charge current alarm (int)
-        #self.protection.current_over = VALUE_FROM_BMS
-
-        # high discharge current alarm (int)
-        #self.protection.current_under = VALUE_FROM_BMS
-
-        # cell imbalance alarm (int)
-        #self.protection.cell_imbalance = VALUE_FROM_BMS
-
-        # internal failure alarm (int)
-        #self.protection.internal_failure = VALUE_FROM_BMS
-
-        # high charge temperature alarm (int)
-        #self.protection.temp_high_charge = VALUE_FROM_BMS
-
-        # low charge temperature alarm (int)
-        #self.protection.temp_low_charge = VALUE_FROM_BMS
-
-        # high temperature alarm (int)
-        #self.protection.temp_high_discharge = VALUE_FROM_BMS
-
-        # low temperature alarm (int)
-        #self.protection.temp_low_discharge = VALUE_FROM_BMS
-
-        # high internal temperature alarm (int)
-        #self.protection.temp_high_internal = VALUE_FROM_BMS
-
-        # fuse blown alarm (int)
-        #self.protection.fuse_blown = VALUE_FROM_BMS
-
-        # HISTORY values
-        # Deepest discharge in Ampere hours (float)
-        #self.history.deepest_discharge = VALUE_FROM_BMS
-
-        # Last discharge in Ampere hours (float)
-        #self.history.last_discharge = VALUE_FROM_BMS
-
-        # Average discharge in Ampere hours (float)
-        #self.history.average_discharge = VALUE_FROM_BMS
-
-        # Number of charge cycles (int)
-        #self.history.charge_cycles = VALUE_FROM_BMS
-
-        # Number of full discharges (int)
-        self.history.full_discharges = 1
-
-        # Total Ah drawn (lifetime) (float)
-        self.history.total_ah_drawn = 139
-
-        # Minimum voltage in Volts (lifetime) (float)
-        #self.history.minimum_voltage = VALUE_FROM_BMS
-
-        # Maximum voltage in Volts (lifetime) (float)
-        #self.history.maximum_voltage = VALUE_FROM_BMS
-
-        # Minimum cell voltage in Volts (lifetime) (float)
-        #self.history.minimum_cell_voltage = VALUE_FROM_BMS
-
-        # Maximum cell voltage in Volts (lifetime) (float)
-        #self.history.maximum_cell_voltage = VALUE_FROM_BMS
-
-        # Time since last full charge in seconds (int)
-        #self.history.time_since_last_full_charge = VALUE_FROM_BMS
-
-        # Number of low voltage alarms (int)
-        #self.history.low_voltage_alarms = VALUE_FROM_BMS
-
-        # Number of high voltage alarms (int)
-        #self.history.high_voltage_alarms = VALUE_FROM_BMS
-
-        # Discharged energy in kilo Watt hours (int)
-        #self.history.discharged_energy = VALUE_FROM_BMS
-
-        # Charged energy in kilo Watt hours (int)
-        #self.history.charged_energy = VALUE_FROM_BMS
-
-        #logger.info(self.hardware_version)
         return True
