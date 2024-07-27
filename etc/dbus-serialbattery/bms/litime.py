@@ -18,7 +18,7 @@ class LiTime_Ble(Battery):
         self.address = address
         self.poll_interval = 2000
 
-    BATTERYTYPE = "Litime"
+    BATTERYTYPE = "LiTime"
 
     write_characteristic = "0000ffe2-0000-1000-8000-00805f9b34fb"
     read_characteristic = "0000ffe1-0000-1000-8000-00805f9b34fb"
@@ -31,11 +31,11 @@ class LiTime_Ble(Battery):
     client = False
     response_event = False
     response_data = False
-    main_thred = False
+    main_thread = False
 
-    Last_remianAh = 0
-    Last_remianAh_time = 0
-    Last_remianAh_initiation = 0
+    last_remian_ah = 0
+    last_remian_ah_time = 0
+    last_remian_ah_initiation = 0
     current_based_on_remaning = 0
     last_few_currents = []
 
@@ -47,8 +47,8 @@ class LiTime_Ble(Battery):
         Return True if success, False for failure
         """
         logger.info("test_connection")
-        self.main_thred = threading.current_thread()
-        ble_async_thread = threading.Thread(name="BMS_bluetooth_async_thred", target=self.initiate_ble_thread_main, daemon=True)
+        self.main_thread = threading.current_thread()
+        ble_async_thread = threading.Thread(name="BMS_bluetooth_async_thread", target=self.initiate_ble_thread_main, daemon=True)
         ble_async_thread.start()
         thread_start_ok = self.ble_async_thread_ready.wait(2)
         connected_ok = self.ble_connection_ready.wait(90)
@@ -82,7 +82,7 @@ class LiTime_Ble(Battery):
         self.ble_async_thread_ready.set()
 
         #try to connect over and over if the connection fails
-        while self.main_thred.is_alive():
+        while self.main_thread.is_alive():
             await self.connect_to_bms(self.address)
             await asyncio.sleep(1)#sleep one second before trying to reconnecting
 
@@ -99,12 +99,12 @@ class LiTime_Ble(Battery):
             return False
         finally:
             self.ble_connection_ready.set()
-            while self.client.is_connected and self.main_thred.is_alive():
+            while self.client.is_connected and self.main_thread.is_alive():
                 await asyncio.sleep(0.1)
             await self.client.disconnect()
 
 
-    async def ble_thred_send_com(self, command):
+    async def ble_thread_send_com(self, command):
         self.response_event = asyncio.Event()
         self.response_data = False
         await self.client.write_gatt_char(self.write_characteristic, command, True)
@@ -112,14 +112,14 @@ class LiTime_Ble(Battery):
         self.response_event = False
         return self.response_data
 
-    async def send_corutine_to_ble_thread_and_wait_for_result(self, corutine):
-        bt_task = asyncio.run_coroutine_threadsafe(corutine, self.ble_async_thread_event_loop)
+    async def send_coroutine_to_ble_thread_and_wait_for_result(self, coroutine):
+        bt_task = asyncio.run_coroutine_threadsafe(coroutine, self.ble_async_thread_event_loop)
         result = await asyncio.wait_for(asyncio.wrap_future(bt_task), timeout=1.5)
         return result
 
     def send_com(self):
         #logger.info("requesting battery status")
-        data = asyncio.run(self.send_corutine_to_ble_thread_and_wait_for_result(self.ble_thred_send_com(self.query_battery_status)))
+        data = asyncio.run(self.send_coroutine_to_ble_thread_and_wait_for_result(self.ble_thread_send_com(self.query_battery_status)))
         self.parse_status(data)
 
     def unique_identifier(self) -> str:
@@ -132,8 +132,8 @@ class LiTime_Ble(Battery):
         return "Bat: " + self.type + " " + self.address[-5:]
 
     def parse_status(self, data):
-        messured_total_voltage, cells_added_together_voltage = unpack_from("II", data, 8)
-        messured_total_voltage /= 1000
+        measured_total_voltage, cells_added_together_voltage = unpack_from("II", data, 8)
+        measured_total_voltage /= 1000
         cells_added_together_voltage /= 1000
 
         heat, balance_memory_active, protection_state, failure_state, is_balancing, battery_state, SOC, SOH, discharges_count, discharges_amph_count = unpack_from("IIIIIHHIII", data, 68)
@@ -167,7 +167,7 @@ class LiTime_Ble(Battery):
         #print(f"heat: {heat}, b_m_a: {balance_memory_active}, protection_state: {protection_state}, failure_state: {failure_state}, is_balancing: {is_balancing}, battery_state: {battery_state}, SOC: {SOC}, SOH: {SOH}, discharges_count: {discharges_count}, discharges_amph_count: {discharges_amph_count}")
 
         self.capacity = full_charge_capacity_amph
-        self.voltage = messured_total_voltage
+        self.voltage = measured_total_voltage
         self.soc = SOC
 
         if is_balancing != 0:
@@ -178,48 +178,48 @@ class LiTime_Ble(Battery):
         #Debug data
         #f = open("/data/charge_log.txt", "a")
         #timestr = time.ctime()
-        #f.write(f"timestr: {timestr} curr: {current}, nk1: {not_known1}, nk2: {not_known2}, n3: {not_known3},  SOC: {SOC}, tot_v: {messured_total_voltage}, add_v: {cells_added_together_voltage}, protect_state: {protection_state}, fail_state: {failure_state}, is_bal: {bin(is_balancing)}, bat_st: {battery_state}, heat: {heat}, b_m_a: {balance_memory_active}, rem_ah: {remaining_amph} {cellv_str}\n")
+        #f.write(f"timestr: {timestr} curr: {current}, nk1: {not_known1}, nk2: {not_known2}, n3: {not_known3},  SOC: {SOC}, tot_v: {measured_total_voltage}, add_v: {cells_added_together_voltage}, protect_state: {protection_state}, fail_state: {failure_state}, is_bal: {bin(is_balancing)}, bat_st: {battery_state}, heat: {heat}, b_m_a: {balance_memory_active}, rem_ah: {remaining_amph} {cellv_str}\n")
         #f.close()
 
         #Due to the fact that the current reading is very inacurare we try to calculate current draw from remaining_amph
         current_based_on_remaning = 0
-        if self.Last_remianAh == 0:
+        if self.last_remian_ah == 0:
             self.current = 0
-            self.Last_remianAh = remaining_amph
-            self.Last_remianAh_time = time.time()
+            self.last_remian_ah = remaining_amph
+            self.last_remian_ah_time = time.time()
 
         now_time = time.time()
-        time_since_last_update = int(now_time - self.Last_remianAh_time)
-        if self.Last_remianAh != remaining_amph:
-            Last_remianAh_time_diff = float(now_time - self.Last_remianAh_time)/3600
-            Last_remianAh_change_diff = remaining_amph - self.Last_remianAh
-            self.Last_remianAh = remaining_amph
-            self.Last_remianAh_time = now_time
-            if self.Last_remianAh_initiation == 0:#since we dont know how long the last reasing has been active we need to wait for another reading
-                self.Last_remianAh_initiation = 1
+        time_since_last_update = int(now_time - self.last_remian_ah_time)
+        if self.last_remian_ah != remaining_amph:
+            last_remian_ah_time_diff = float(now_time - self.last_remian_ah_time)/3600
+            last_remian_ah_change_diff = remaining_amph - self.last_remian_ah
+            self.last_remian_ah = remaining_amph
+            self.last_remian_ah_time = now_time
+            if self.last_remian_ah_initiation == 0:#since we dont know how long the last reasing has been active we need to wait for another reading
+                self.last_remian_ah_initiation = 1
             else:
-                self.current_based_on_remaning = Last_remianAh_change_diff/Last_remianAh_time_diff
-                self.Last_remianAh_initiation = 2
+                self.current_based_on_remaning = last_remian_ah_change_diff/last_remian_ah_time_diff
+                self.last_remian_ah_initiation = 2
 
         #Calculate average current over last 5 messurments due to sensor inacuracy
         self.last_few_currents.append(current)
         if len(self.last_few_currents) > 5:
             self.last_few_currents.pop(0)
 
-        Last_few_avg = sum(self.last_few_currents)/len(self.last_few_currents)
+        last_few_avg = sum(self.last_few_currents)/len(self.last_few_currents)
 
         Use_Reason = ""
         #if last update was long ago we use the current reported by the bms despite it beeing unstable, we also use the current from the BMS if there is a very large discrepency betwen them
         if time_since_last_update > 25:
-            self.current = Last_few_avg
+            self.current = last_few_avg
             Use_Reason = "curr: over 120s since last remaining_amph update"
 
-        elif self.Last_remianAh_initiation != 2:
-            self.current = Last_few_avg
-            Use_Reason = "curr: Last_remianAh not initiated with base values"
+        elif self.last_remian_ah_initiation != 2:
+            self.current = last_few_avg
+            Use_Reason = "curr: last_remian_ah not initiated with base values"
 
         elif time_since_last_update > 5 and (self.current_based_on_remaning + 3 < self.current or self.current_based_on_remaning - 3 > self.current):
-            self.current = Last_few_avg
+            self.current = last_few_avg
             Use_Reason = "curr: Large differances betwen base and curr despite recent base update"
 
         else:
@@ -227,7 +227,7 @@ class LiTime_Ble(Battery):
             Use_Reason = "base"
 
         #Debug data
-        #logger.info(f"{Use_Reason}, current:{current:.3f}, Last_few_avg: {Last_few_avg:.3f}, base: {self.current_based_on_remaning:.3f}")
+        #logger.info(f"{Use_Reason}, current:{current:.3f}, last_few_avg: {last_few_avg:.3f}, base: {self.current_based_on_remaning:.3f}")
 
 
         # status of the battery if charging is enabled (bool)
